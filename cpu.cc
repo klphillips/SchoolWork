@@ -103,6 +103,7 @@ PCB *idle;
 list<PCB *> processes;
 
 int sys_time;
+int CPU_pid;
 
 /*
 ** a signal handler for those signals delivered to this process, but
@@ -232,54 +233,138 @@ int eye2eh (int i, char *buf, int bufsize, int base)
    return (action);
  }
 
- void process_done (int signum)
- {
-   WRITES ("---- entering process_done\n");
-   assert (signum == SIGCHLD);
+void scheduler (int signum)
+{
+  WRITES ("---- entering scheduler\n");
+  assert (signum == SIGALRM);
+  sys_time++;
 
-   for (;;)
-     {
-       int status, cpid;
-       cpid = waitpid (-1, &status, WNOHANG);
+  bool found_one = false;
+  for (unsigned int i = 1; i <= processes.size(); i++)
+    {
+      PCB *front = processes.front();
+      processes.pop_front ();
+      processes.push_back (front);
 
-       if (cpid < 0)
-	 {
-	   WRITES (sys_errlist[errno]);
-	   WRITENL;
-	 }
-       else if (cpid == 0)
-	 {
-	   WRITES ("cpid == 0\n");
-	   break;
-	 }
-       else
-	 {
-	   WRITES ("process exited: ");
-	   WRITEI (cpid, 7);
-	   WRITENL;
-            
-            
-            
-	   cout << running;
-	   WRITES("total interrupts: ");
-	   WRITEI(running->interrupts , 7);
-	   WRITES(" seconds");
-	   WRITENL;
-	   WRITES("total switches: ");
-	   WRITEI(running->switches, 7);
-	   WRITENL;
-	   WRITES("total run time: ");
-	   WRITEI(sys_time - running->started, 7);
-	   WRITES(" seconds");
-	   WRITENL;
-            
-	   running->state = TERMINATED;
-	   running = idle;         
-	   running->state = RUNNING;
-	 }
-     }
+      if (front->state == NEW)
+        {
+	  WRITES ("starting: ");
+	  WRITES (front->name);
+	  WRITENL;
 
-   WRITES ("---- leaving process_done\n");
+	  front->state = RUNNING;
+	  front->ppid = CPU_pid;
+	  front->interrupts = 0;
+	  front->switches = 0;
+	  front->started = sys_time;
+	  running = front;
+
+	  if ((front->pid = fork()) == 0)
+            {
+	      execl (front->name, front->name, NULL);
+            }
+	  found_one = true;
+	  break;
+        }
+      else if (front->state == READY)
+        {
+	  WRITES ("continuing");
+	  WRITEI (front->pid, 7);
+	  WRITENL;
+
+	  front->state = RUNNING;
+	  front->switches++;
+	  running = front;
+	  if (kill (front->pid, SIGCONT) == -1)
+            {
+	      WRITES ("error continuing: ");
+	      WRITEI (front->pid, 7);
+	      WRITES (": ");
+	      WRITEI (errno, 7);
+	      WRITENL;
+	      kill (0, SIGTERM);
+            }
+	  found_one = true;
+	  break;
+        }
+    }
+
+  if (!found_one)
+    {
+      WRITES ("continuing idle\n");
+      idle->state = RUNNING;
+      if (kill (idle->pid, SIGCONT) == -1)
+        {
+	  WRITES ("error continuing idle: ");
+	  WRITEI (errno, 7);
+	  WRITENL;
+	  kill (0, SIGTERM);
+        }
+    }
+
+  WRITES ("---- leaving scheduler\n");
+}
+
+void process_done (int signum)
+{
+  WRITES ("---- entering process_done\n");
+  assert (signum == SIGCHLD);
+
+  // have to poll
+  for (unsigned int i = 1; i <= processes.size(); i++)
+    {
+      int status, cpid;
+      cpid = waitpid (-1, &status, WNOHANG);
+
+      if (cpid < 0)
+        {
+	  WRITES ("cpid < 0\n");
+	  kill (0, SIGTERM);
+        }
+      else if (cpid == 0)
+        {
+	  WRITES ("cpid == 0\n");
+	  break;
+        }
+      else
+        {
+	  WRITES ("process exited:\n");
+	  list<PCB *>::iterator PCB_iter;
+	  for (PCB_iter = processes.begin();
+	       PCB_iter != processes.end();
+	       PCB_iter++)
+            {
+	      if ((*PCB_iter)->pid == cpid)
+                {
+		  WRITES("total interrupts: ");
+		  WRITEI((*PCB_iter)->interrupts , 7);
+		  WRITENL;
+		  WRITES("total switches: ");
+		  WRITEI((*PCB_iter)->switches, 7);
+		  WRITENL;
+		  WRITES("total run time: ");
+		  WRITEI(sys_time - (*PCB_iter)->started, 7);
+		  WRITES(" seconds");
+		  WRITENL;
+		  (*PCB_iter)->state = TERMINATED;
+		  cout << *PCB_iter;
+                }
+            }
+        }
+
+      WRITES ("continuing idle\n");
+      running = idle;
+      idle->state = RUNNING;
+      if (kill (idle->pid, SIGCONT) == -1)
+	{
+	  WRITES ("error continuing idle: ");
+	  WRITEI (errno, 7);
+	  WRITENL;
+	  kill (0, SIGTERM);
+	}
+
+      WRITES ("---- leaving process_done\n");
+    }
  }
 
  /*
@@ -308,6 +393,13 @@ int eye2eh (int i, char *buf, int bufsize, int base)
 
  void start_clock()
  {
+   sys_time = 0;
+
+   ISV[SIGALRM] = scheduler;    
+   create_handler (SIGALRM, ISR);
+   ISV[SIGCHLD] = process_done;
+   create_handler (SIGCHLD, ISR);
+
    int ret;
    if ((ret = fork()) == 0)
      {
@@ -347,7 +439,8 @@ int eye2eh (int i, char *buf, int bufsize, int base)
    running = idle;
  }
 
- PCB* chooseProcess() {
+/* PCB* chooseProcess() {
+   WRITES("got here");
    running->interrupts++;
    //check for new, fork excl then return 
    //check for ready, if something other than idle is ready 
@@ -411,7 +504,7 @@ int eye2eh (int i, char *buf, int bufsize, int base)
      }
      running = idle;
      return idle;
-   }
+     }*/
 
    void createProcess(const char *executable){
      //Creates processes for executables for main to execute 
@@ -426,52 +519,29 @@ int eye2eh (int i, char *buf, int bufsize, int base)
      processes.push_back(processExecutable);
    }
 
-void scheduler (int signum)
-{
-  WRITES ("---- entering scheduler\n");
-  assert (signum == SIGALRM);
-  sys_time++;
-
-  PCB* tocont = chooseProcess();
-
-  WRITES ("continuing");
-  WRITEI (tocont->pid, 7);
-  WRITENL;
-
-  tocont->state = RUNNING;
-
-  if (kill (tocont->pid, SIGCONT) == -1)
-    {
-      WRITES ("in sceduler kill error: ");
-      WRITEI (errno, 7);
-      WRITENL;
-      return;
-    }
-  WRITES ("---- leaving scheduler\n");
-}
-
    int main (int argc, char **argv)
    {
-     sys_time = 0;
-     ISV[SIGALRM] = scheduler;       create_handler (SIGALRM, ISR);
-     ISV[SIGCHLD] = process_done;    create_handler (SIGCHLD, ISR);
-
-
-     // create a process to soak up cycles
-     create_idle ();
-
-     cout << running;
-
-     start_clock();
-
+     //create  a process to soak up cycles
+     
      // we keep this process around so that the children don't die and
      // to keep the IRQs in place.
      int i;
      for (i=1; i <argc; i++)
        {
 	 createProcess(argv[i]);
+	 
+       }
+
+     start_clock();
+
+     CPU_pid = getpid();
+     create_idle();
+     
+     for (;;)
+       {
 	 pause();
 	 if (errno == EINTR) { continue; }
 	 perror ("pause");
        }
+
    }
