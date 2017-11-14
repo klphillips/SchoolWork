@@ -26,12 +26,13 @@
     fprintf(stderr, "assertion %s failed: file %s, line %d, error %s\n", \
         #a, __FILE__, __LINE__, strerror(errno)); exit(1); }
 #define NUM_THREADS 2
+pthread_mutex_t mutex;
 int i;
 
 void *foo (void *bar) {
     pthread_t *me = new pthread_t (pthread_self());
     SYSASSERT(printf ("in a foo thread, ID %ld\n", *me) != 0);
-
+    SYSASSERT(pthread_mutex_lock(&mutex) == 0);
     for (i = 0; i < * ((int *) bar); i++) {
         int tmp = i;
 
@@ -39,13 +40,14 @@ void *foo (void *bar) {
             SYSASSERT(printf("aargh: %d != %d\n", tmp, i) != 0);
         }
     }
-
+    SYSASSERT(pthread_mutex_unlock(&mutex) == 0);
     pthread_exit (me);
 }
 
 int main (int argc, char **argv) {
     int iterations = strtol (argv[1], NULL, 10);
     pthread_t threads[NUM_THREADS];
+    SYSASSERT(pthread_mutex_init(&mutex,NULL) ==0);
 
     for (int i = 0; i < NUM_THREADS; i++) {
         SYSASSERT(pthread_create(&threads[i], NULL, foo,
@@ -59,6 +61,6 @@ int main (int argc, char **argv) {
         SYSASSERT(printf ("joined a foo thread, number %ld\n",
             * ((pthread_t *) status)) != 0);
     }
-
+    SYSASSERT(pthread_mutex_destroy(&mutex) == 0);
     return (0);
 }
